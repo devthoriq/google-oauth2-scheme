@@ -23,7 +23,8 @@ def index():
     return '''
         <h1>Welcome to the OAuth 2.0 Demo!</h1>
         <a href="/authorize">Authorize</a><br><br>
-        <a href="/get_accounts">Get My Business Accounts</a>
+        <a href="/get_accounts">Get My Business Accounts</a><br><br>
+        <a href="/refresh">Refresh Token</a>
     '''
 
 @app.route('/authorize')
@@ -36,18 +37,18 @@ def authorize():
         access_type='offline',
         include_granted_scopes='true')
 
-    session['state'] = state  # Ensure state is stored in session
-    print(f"State stored in session: {state}")  # Debug statement
+    session['state'] = state
+    print(f"State stored in session: {state}")
     return redirect(authorization_url)
 
 @app.route('/oauth2callback')
 def oauth2callback():
     if 'state' not in session:
-        print("State not found in session")  # Debug statement
-        return 'State not found in session. Authorization failed.', 400  # Return an error if state is not found
+        print("State not found in session")
+        return 'State not found in session. Authorization failed.', 400
 
     state = session['state']
-    print(f"State retrieved from session: {state}")  # Debug statement
+    print(f"State retrieved from session: {state}")
     flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
     flow.redirect_uri = REDIRECT_URI
@@ -56,28 +57,33 @@ def oauth2callback():
     flow.fetch_token(authorization_response=authorization_response)
 
     credentials = flow.credentials
-
-    # Save the credentials for the user in the session.
-    # In a production app, you would want to save these credentials in a database.
     session['credentials'] = credentials_to_dict(credentials)
-    print(f"Credentials stored in session: {session['credentials']}")  # Debug statement
+    print(f"Credentials stored in session: {session['credentials']}")
 
     return 'Authorization successful!'
 
 @app.route('/get_accounts')
 def get_accounts():
     if 'credentials' not in session:
+        print("No credentials in session, redirecting to authorize")
         return redirect('authorize')
 
     credentials = google.oauth2.credentials.Credentials(
         **session['credentials'])
 
-    if credentials.expired:
+    if credentials.expired or credentials.token is None:
+        print("Token is expired or None, refreshing token")
         request = google.auth.transport.requests.Request()
-        credentials.refresh(request)
-        session['credentials'] = credentials_to_dict(credentials)
+        try:
+            credentials.refresh(request)
+            session['credentials'] = credentials_to_dict(credentials)
+            print("Token refreshed successfully")
+        except Exception as e:
+            print(f"Error refreshing token: {e}")
+            return 'Error refreshing token. Please re-authorize.', 400
 
     access_token = credentials.token
+    print(f"Using access token: {access_token}")
 
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -89,24 +95,32 @@ def get_accounts():
         accounts = response.json()
         return f'<h1>Accounts:</h1><pre>{json.dumps(accounts, indent=2)}</pre>'
     else:
+        print(f"Error fetching accounts: {response.status_code} - {response.text}")
         return f'Error: {response.status_code} - {response.text}'
 
 @app.route('/refresh')
 def refresh():
     if 'credentials' not in session:
+        print("No credentials in session, redirecting to authorize")
         return redirect('authorize')
 
     credentials = google.oauth2.credentials.Credentials(
         **session['credentials'])
 
-    if credentials.expired:
+    if credentials.expired or credentials.token is None:
+        print("Token is expired or None, refreshing token")
         request = google.auth.transport.requests.Request()
-        credentials.refresh(request)
-
-        session['credentials'] = credentials_to_dict(credentials)
-        print(f"Credentials stored in session: {session['credentials']}")
-
-    return 'Token refreshed successfully!'
+        try:
+            credentials.refresh(request)
+            session['credentials'] = credentials_to_dict(credentials)
+            print("Token refreshed successfully")
+            return 'Token refreshed successfully!'
+        except Exception as e:
+            print(f"Error refreshing token: {e}")
+            return 'Error refreshing token. Please re-authorize.', 400
+    else:
+        print("Token is still valid")
+        return 'Token is still valid. No need to refresh.'
 
 def credentials_to_dict(credentials):
     return {'token': credentials.token,
