@@ -8,8 +8,8 @@ import googleapiclient.discovery
 import google.auth.transport.requests
 import requests
 
-# Configure the OAuth 2.0 flow using client secrets file
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # For testing only, disable in production
+
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 CLIENT_SECRETS_FILE = "client_secret.json"
 
 SCOPES = ['https://www.googleapis.com/auth/business.manage']
@@ -37,18 +37,18 @@ def authorize():
         access_type='offline',
         include_granted_scopes='true')
 
-    session['state'] = state
-    print(f"State stored in session: {state}")
+    session['state'] = state  
+    print(f"State stored in session: {state}")  
     return redirect(authorization_url)
 
 @app.route('/oauth2callback')
 def oauth2callback():
     if 'state' not in session:
-        print("State not found in session")
-        return 'State not found in session. Authorization failed.', 400
+        print("State not found in session")  
+        return 'State not found in session. Authorization failed.', 400  
 
     state = session['state']
-    print(f"State retrieved from session: {state}")
+    print(f"State retrieved from session: {state}")  
     flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
     flow.redirect_uri = REDIRECT_URI
@@ -57,10 +57,35 @@ def oauth2callback():
     flow.fetch_token(authorization_response=authorization_response)
 
     credentials = flow.credentials
+
     session['credentials'] = credentials_to_dict(credentials)
-    print(f"Credentials stored in session: {session['credentials']}")
+    print(f"Credentials stored in session: {session['credentials']}")  
 
     return 'Authorization successful!'
+
+def refresh_access_token():
+    refresh_token = session['credentials']['refresh_token']
+    client_id = session['credentials']['client_id']
+    client_secret = session['credentials']['client_secret']
+    token_uri = session['credentials']['token_uri']
+
+    payload = {
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'refresh_token': refresh_token,
+        'grant_type': 'refresh_token',
+    }
+
+    token_response = requests.post(token_uri, data=payload)
+
+    if token_response.status_code == 200:
+        new_tokens = token_response.json()
+        session['credentials']['token'] = new_tokens['access_token']
+        print("Token refreshed successfully")
+        return True
+    else:
+        print(f"Error refreshing token: {token_response.status_code} - {token_response.text}")
+        return False
 
 @app.route('/get_accounts')
 def get_accounts():
@@ -71,29 +96,38 @@ def get_accounts():
     credentials = google.oauth2.credentials.Credentials(
         **session['credentials'])
 
-    if credentials.expired or credentials.token is None:
-        print("Token is expired or None, refreshing token")
-        request = google.auth.transport.requests.Request()
-        try:
-            credentials.refresh(request)
-            session['credentials'] = credentials_to_dict(credentials)
-            print("Token refreshed successfully")
-        except Exception as e:
-            print(f"Error refreshing token: {e}")
-            return 'Error refreshing token. Please re-authorize.', 400
-
     access_token = credentials.token
-    print(f"Using access token: {access_token}")
-
     headers = {
         'Authorization': f'Bearer {access_token}',
     }
 
     response = requests.get('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', headers=headers)
+    response_json = response.json()
 
-    if response.status_code == 200:
-        accounts = response.json()
+    if response.status_code == 200 and 'error' not in response_json:
+        accounts = response_json
         return f'<h1>Accounts:</h1><pre>{json.dumps(accounts, indent=2)}</pre>'
+    elif response.status_code == 401 or ('error' in response_json and response_json['error']['code'] == 401):
+        print("Access token expired, attempting to refresh token")
+
+        if 'refresh_token' not in session['credentials']:
+            print("No refresh token available, redirecting to authorize")
+            return redirect('authorize')
+
+        if refresh_access_token():
+            access_token = session['credentials']['token']
+            headers['Authorization'] = f'Bearer {access_token}'
+            response = requests.get('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', headers=headers)
+            response_json = response.json()
+
+            if response.status_code == 200 and 'error' not in response_json:
+                accounts = response_json
+                return f'<h1>Accounts:</h1><pre>{json.dumps(accounts, indent=2)}</pre>'
+            else:
+                print(f"Error fetching accounts after refresh: {response.status_code} - {response.text}")
+                return f'Error: {response.status_code} - {response.text}'
+        else:
+            return 'Error refreshing token. Please re-authorize.', 400
     else:
         print(f"Error fetching accounts: {response.status_code} - {response.text}")
         return f'Error: {response.status_code} - {response.text}'
@@ -104,23 +138,10 @@ def refresh():
         print("No credentials in session, redirecting to authorize")
         return redirect('authorize')
 
-    credentials = google.oauth2.credentials.Credentials(
-        **session['credentials'])
-
-    if credentials.expired or credentials.token is None:
-        print("Token is expired or None, refreshing token")
-        request = google.auth.transport.requests.Request()
-        try:
-            credentials.refresh(request)
-            session['credentials'] = credentials_to_dict(credentials)
-            print("Token refreshed successfully")
-            return 'Token refreshed successfully!'
-        except Exception as e:
-            print(f"Error refreshing token: {e}")
-            return 'Error refreshing token. Please re-authorize.', 400
+    if refresh_access_token():
+        return 'Token refreshed successfully!'
     else:
-        print("Token is still valid")
-        return 'Token is still valid. No need to refresh.'
+        return 'Error refreshing token. Please re-authorize.', 400
 
 def credentials_to_dict(credentials):
     return {'token': credentials.token,
